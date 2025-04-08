@@ -492,7 +492,8 @@
 			synaptics,input-device-name = "touch_keypad";
 			synaptics,resolution_x = <21>;
 			synaptics,resolution_y = <21>;
-			disable-in-closed-slider;
+			synaptics,disable-in-closed-slider;
+			synaptics,disable-while-sliding;
 		};
 	};
 
@@ -526,12 +527,10 @@
 			synaptics,input-device-name = "touch_display";
 			synaptics,resolution_x = <21>;
 			synaptics,resolution_y = <21>;
-			synaptics,wakeup-gesture;
-			synaptics,wakeup-gesture-no-criteria;
-			enable-touch-cancel;
-			enable-edge-touches;
+
 		};
 
+		/*
 		synaptics_dsx_i2c_display@20 {
 			compatible = "synaptics,dsx";
 			reg = <0x20>;
@@ -557,11 +556,8 @@
 			synaptics,input-device-name = "touch_display";
 			synaptics,resolution_x = <21>;
 			synaptics,resolution_y = <21>;
-			synaptics,wakeup-gesture;
-			synaptics,wakeup-gesture-no-criteria;
-			enable-touch-cancel;
-			enable-edge-touches;
 		};
+		*/
 	};
 
 	/* No i2c_3 or i2c_4. i2c for camera is handled via CCI not regular i2c driver */
@@ -786,7 +782,10 @@
 			st,column-mask = /bits/ 16 <0x00F7>;
 			st,scan-count = <2>;
 			st,debounce = <10>;
-			st,scan-frequency = <30>;
+			st,scan-frequency = <60>;
+			st,check-inadv = <0x39>;
+			st,inadv-timeout = <200>;
+			st,key-count = <0x0e>;
 			pinctrl-names = "default";
 			pinctrl-0 = <&keypad_int_default>;
 			linux,keymap = <0x3010010
@@ -826,6 +825,8 @@
 					0x5020036
 					0x203007d
 					0x204007e>;
+			disable-in-closed-slider;
+			disable-while-sliding;
 		};
 	};
 

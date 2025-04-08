@@ -30,6 +30,7 @@
 #include <linux/fb.h>
 #endif
 #include <linux/completion.h>
+#include <linux/platform_device.h>
 
 #if (LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 38))
 #define KERNEL_ABOVE_2_6_38
@@ -66,6 +67,8 @@
 
 /* F01 data registers - offsets from base address */
 #define SYNAPTICS_F01_DATA_DEVICE_STATUS            0x00
+  #define SYNAPTICS_F01_UNCONFIGURED                0x80
+  #define SYNAPTICS_F01_FLASH_PROG                  0x40
   #define SYNAPTICS_F01_NO_ERROR                    0x00
   #define SYNAPTICS_F01_RESET_OCCURRED              0x01
   #define SYNAPTICS_F01_INV_CONFIG                  0x02
@@ -73,8 +76,6 @@
   #define SYNAPTICS_F01_CONFIG_CRC_FAIL             0x04
   #define SYNAPTICS_F01_FIRMWARE_CRC_FAIL           0x05
   #define SYNAPTICS_F01_CRC_IN_PROGRESS             0x06
-  #define SYNAPTICS_F01_FLASH_PROG                  0x40
-  #define SYNAPTICS_F01_UNCONFIGURED                0x80
 
 #define SYNAPTICS_CRC_DELAY_MS                      50
 
@@ -117,6 +118,8 @@
 
 #define SYNAPTICS_SWIPE_BUFFER_EVENT_COUNT             (20)
 #define SYNAPTICS_SWIPE_BUFFER_EVENT_SIZE               (4)
+
+
 
 #define RESUME_IGNORE_TOUCH_DELAY (100)	/*msec*/
 
@@ -283,6 +286,54 @@ struct synaptics_rmi4_device_info {
 	struct list_head support_fn_list;
 };
 
+struct synaptics_rmi4_stats_entry {
+	unsigned long msecs;
+	int total_int_cnt;
+	int total_int_served_cnt;
+	int status_int_cnt;
+	int touch_int_cnt;
+	int touch_report_cnt;
+	int touch_large_object_cnt;
+	int touch_frelease_cnt;
+	int touch_trelease_cnt;
+	unsigned char unexpected_reset;
+	unsigned char status_error;
+};
+
+struct synaptics_rmi4_event_entry {
+	unsigned long msecs;
+	unsigned char event_id;
+	int16_t event_data[SYNAPTICS_EVENT_DATA_SIZE];
+};
+
+struct synaptics_rmi4_events {
+	struct mutex mutex;
+	int num_events_entries;
+	int next_events_entry;
+	struct synaptics_rmi4_event_entry list[SYNAPTICS_EVENTS_SIZE];
+};
+
+struct synaptics_rmi4_stats {
+	int total_int_cnt;
+	int total_int_served_cnt;
+	int status_int_cnt;
+	int touch_int_cnt;
+	int touch_report_cnt;
+	int touch_large_object_cnt;
+	int touch_frelease_cnt;
+	int touch_trelease_cnt;
+	int unexpected_reset;
+	int status_error;
+	bool active;
+	bool update;
+	struct mutex mutex;
+	struct timer_list timer;
+	int num_stats_entries;
+	int next_stats_entry;
+	struct synaptics_rmi4_stats_entry list[SYNAPTICS_STATS_SIZE];
+	struct work_struct timeout_work;
+};
+
 struct synaptics_rmi4_exp_fhandler {
 	struct synaptics_rmi4_exp_fn *exp_fn;
 	bool insert;
@@ -322,6 +373,56 @@ struct synaptics_wakeup_gesture {
 		} __packed;
 		unsigned char data;
 	};
+};
+
+struct synaptics_rmi4_mtouch_counter {
+	int glass_on_delay_300ms;
+	int glass_on_delay_500ms;
+	int glass_on_delay_750ms;
+	int glass_on_delay_1000ms;
+	int dtwakeup_delay_200ms;
+	int dtwakeup_delay_400ms;
+	int dtwakeup_delay_1sec;
+	int successful_double_tap;
+	int swipe_wakeup;
+	int double_tap;
+	int upgrade_failure;
+	int face_detection;
+	int tap_failure[SYNAPTICS_TAP_FAILURE_MAX - 1];
+	int total_tap_failure_cnt;
+	int tap_failure_in_proxi_delta;
+	int inadv_tap_failure_delta0;
+	int inadv_tap_failure_delta1;
+	int failed_taps_in_proxi;
+	int inadv_tap_failures;
+	int proxi_detected;
+	int proxi_timeout;
+	int proxi_not_ready;
+	int proxi_io_error;
+	int few_pos_buff;
+	int i2c_rw_error;
+	int t_up_without_down;
+
+	bool active;
+	struct mutex mutex;
+	struct timer_list timer;
+
+	int inadv_tap_det_tmout_ms;
+	struct hrtimer inadv_tapdet_hrtimer;
+	struct work_struct inadv_tapdet_tmout_work;
+};
+
+/* struct synaptics_disable_irq_counter - enable irq counters
+ * counters are decreased when irq is disabled
+ * and are increased when irq is enabled
+ * @irq: irq disabled/enabled by synaptics_rmi4_irq_enable
+ * @irq_nosync: irq disabled/enabled by disable_irq_nosync/enable_irq
+ * @irq_wake: irq disabled/enabled by disable_irq_wake/enable_irq_wake
+ */
+struct synaptics_enable_irq_counter {
+	char irq;
+	char irq_nosync;
+	char irq_wake;
 };
 
 struct synpatics_regulator {
@@ -395,6 +496,8 @@ struct synaptics_rmi4_data {
 	unsigned short f01_data_base_addr;
 	unsigned int firmware_id;
 	unsigned char config_id[4];
+	unsigned long dtwakeup_time_ms;
+	uint8_t wakeup_check_mask;
 	int irq;
 	int sensor_max_x;
 	int sensor_max_y;
@@ -411,7 +514,9 @@ struct synaptics_rmi4_data {
 	bool state_changed;
 	bool f11_wakeup_gesture;
 	bool f12_wakeup_gesture;
+	bool proxi_check;
 	bool face_detection_check;
+	bool touch_state;
 	struct synaptics_wakeup_gesture wakeup_gesture;
 	struct synaptics_f51_extra_wakeup_info extra_wakeup_info;
 #ifdef F12_DATA_15_WORKAROUND
@@ -438,9 +543,7 @@ struct synaptics_rmi4_data {
 	struct synaptics_rmi4_exp_fn_data exp_data;
 
 	/* Holds opaque pointer to firmware module */
-#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_FW_UPDATE
 	void *fwu;
-#endif
 
 	/* Holds opaque pointers to test reporting module */
 	void *f54;
@@ -450,12 +553,24 @@ struct synaptics_rmi4_data {
 	void *rmidev;
 	void *slide;
 
+	struct synaptics_rmi4_stats stats;
+	struct synaptics_rmi4_events events;
+	struct delayed_work recovery_work;
+	struct delayed_work lockup_work;
 	struct work_struct irq_work;
 	struct work_struct reset_work;
 	struct work_struct fwu_done;
+	struct work_struct glass_on_work;
 	bool   hw_reset;
+#ifdef CONFIG_PM
+	struct work_struct power_state_work;
+#ifdef CONFIG_FB
+	struct notifier_block fb_notif;
+#endif
+#endif
 	struct work_struct slider_work;
 	bool   lid_state;
+	bool   smart_flip_state;
 	uint8_t touch_obj_cnt;
 	bool   ignore_touch;
 	bool   resume_ignore_touch;
@@ -463,10 +578,17 @@ struct synaptics_rmi4_data {
 	uint8_t init_complete;
 	uint8_t slider_keys_values;
 	uint8_t slider_state;
+	unsigned char fb_blank;
+	unsigned char fb_event;
 	bool touch_ready;
+	int proxi_pocket;
+	struct completion proxi_completion;
 	unsigned char wakeup_source;
 	bool touch_edge[F12_FINGERS_TO_SUPPORT];
 	unsigned char last_tap_status[SYNAPTICS_TAP_FAILURE_MAX];
+	struct synaptics_enable_irq_counter en_irq_counter;
+
+	struct synaptics_rmi4_mtouch_counter mtouch_counter;
 };
 
 struct synaptics_dsx_bus_access {
@@ -498,6 +620,7 @@ struct synaptics_rmi4_exp_fn {
 };
 
 int synaptics_rmi4_bus_init(void);
+void synaptics_rmi4_glass_on_notif(bool glass_off);
 void synaptics_rmi4_bus_exit(void);
 void synaptics_rmi4_new_function(struct synaptics_rmi4_data *rmi4_data,
 		struct synaptics_rmi4_exp_fn *exp_fn_module,
@@ -535,7 +658,8 @@ static inline int synaptics_rmi4_reg_write(
 static inline ssize_t synaptics_rmi4_show_error(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	dev_warn(dev, "%s Attempted to read from write-only attribute %s\n",
+	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
+	dev_warn(rmi4_data->pdev->dev.parent, "%s Attempted to read from write-only attribute %s\n",
 			__func__, attr->attr.name);
 	return -EPERM;
 }
@@ -543,7 +667,8 @@ static inline ssize_t synaptics_rmi4_show_error(struct device *dev,
 static inline ssize_t synaptics_rmi4_store_error(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
-	dev_warn(dev, "%s Attempted to write to read-only attribute %s\n",
+	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
+	dev_warn(rmi4_data->pdev->dev.parent, "%s Attempted to write to read-only attribute %s\n",
 			__func__, attr->attr.name);
 	return -EPERM;
 }
