@@ -25,7 +25,10 @@
 
 #include "mdss_dsi.h"
 #include "mdss_livedisplay.h"
+#include "mdss_mdp.h"
+#include <asm/uaccess.h>
 
+extern void synaptics_rmi4_glass_on_notif(bool glass_off) __attribute__((weak));
 #define DT_CMD_HDR 6
 #define MIN_REFRESH_RATE 30
 #define DEFAULT_MDP_TRANSFER_TIME 14000
@@ -253,6 +256,22 @@ static void mdss_dsi_panel_bklt_dcs(struct mdss_dsi_ctrl_pdata *ctrl, int level)
 		cmdreq.cmds = alpm_brightness_cmd;
 		cmdreq.cmds_cnt = 6;
 	} else {
+
+		u8 off_ratio      = 23 - ((1U   * (level - 1)) / 254);     // 23 → 22
+		u8 b5_value       = 110 - ((67U * (level - 1)) / 254);     // 110 → 43
+		u16 elvss_voltage = 2500 - ((2241U * (level - 1)) / 254);  // 2500 → 259
+		
+		/*
+		u8 off_ratio     = 24 - ((2U   * (level - 1)) / 254);   // 24 → 22
+		u8 b5_value      = 110 - ((67U * (level - 1)) / 254);   // 110 → 43
+		u16 elvss_voltage = 2550 - ((2291U * (level - 1)) / 254); // 2550 → 259
+
+		u8 off_ratio      = 25 - ((3U   * (level - 1)) / 254);     // 25 → 22
+		u8 b5_value       = 110 - ((67U * (level - 1)) / 254);     // 110 → 43
+		u16 elvss_voltage = 2560 - ((2301U * (level - 1)) / 254);  // 2560 → 259
+		*/
+
+		/* GT
 		u8 b5_value = 97;
 		u8 off_ratio = 18;
 		u16 elvss_voltage = 2344;
@@ -275,6 +294,9 @@ static void mdss_dsi_panel_bklt_dcs(struct mdss_dsi_ctrl_pdata *ctrl, int level)
 			elvss_voltage = 259;
 		else if (level > 5)
 			elvss_voltage = 2576 - 25760 * level / 556;
+		*/
+
+		pr_info("Level: %d, b5_value: %d, off_ratio: %d, elvss_voltage: %d\n", level, b5_value, off_ratio, elvss_voltage);
 
 		brightness_b5[4] = b5_value;
 		brightness_set_off_ratio[2] = off_ratio;
@@ -720,6 +742,228 @@ static void mdss_dsi_panel_bl_ctrl(struct mdss_panel_data *pdata,
 	}
 }
 
+/* Apply Panel Colour Correction - send the register settings
+ * to the MDP to be written to hardware
+ */
+static void mdss_apply_pcc(struct mdss_panel_data *pdata)
+{
+	struct	msmfb_mdp_pp pp;
+	int		copy;
+	int		ret;
+
+	if (pdata->panel_info.pcc_enabled) {
+		memset(&pp, 0, sizeof(pp));
+		pp.op = mdp_op_pcc_cfg;
+		pp.data.pcc_cfg_data.block = MDP_LOGICAL_BLOCK_DISP_0;
+		pp.data.pcc_cfg_data.ops = MDP_PP_OPS_ENABLE | MDP_PP_OPS_WRITE;
+
+		memcpy(&pp.data.pcc_cfg_data.r, &pdata->panel_info.pcc_data[0],
+			   sizeof(uint32_t) * MDSS_PCC_DATA_TABLE_SIZE);
+
+		ret = mdss_mdp_pcc_config(&pp.data.pcc_cfg_data, &copy);
+		if (ret)
+			pr_err("%s: failed to set PCC!\n", __func__);
+		else
+			pr_notice("%s: set PCC successfully.\n", __func__);
+	} else
+		pr_notice("%s: no pcc in panel_info\n", __func__);
+}
+
+/* Apply Gamut Map - send the register settings
+ * to the MDP to be written to hardware
+ */
+static void mdss_apply_gamut_map(struct mdss_panel_data *pdata)
+{
+	struct mdp_gamut_cfg_data  gm_data = {0};
+	int gamut_data_table_size[MDP_GAMUT_TABLE_NUM] =
+	{125, 100, 80, 100, 100, 80, 64, 80}; /* it isn't clear where these
+											 values come from */
+	int ret;
+	int i;
+	int cur_offset = 0;
+	bool alloc_failed = false;
+
+	if (pdata->panel_info.gm_flags & MDSS_CC_FLAGS_GAMUT_DIRTY) {
+		gm_data.block = MDP_LOGICAL_BLOCK_DISP_0;
+		gm_data.flags = MDP_PP_OPS_ENABLE | MDP_PP_OPS_WRITE;
+		gm_data.gamut_first = 0;
+
+		for (i=0; i < MDP_GAMUT_TABLE_NUM; i++) {
+			gm_data.tbl_size[i] = gamut_data_table_size[i];
+			gm_data.r_tbl[i] = kzalloc(sizeof(uint16_t) * gm_data.tbl_size[i],
+									   GFP_KERNEL);
+			if (!gm_data.r_tbl[i]) {
+				pr_err("%s: Unable to allocate r_tbl[%d]!\n", __func__, i);
+				alloc_failed = true;
+				break;
+			}
+			gm_data.g_tbl[i] = kzalloc(sizeof(uint16_t) * gm_data.tbl_size[i],
+									   GFP_KERNEL);
+			if (!gm_data.g_tbl[i]) {
+				pr_err("%s: Unable to allocate g_tbl[%d]!\n", __func__, i);
+				alloc_failed = true;
+				break;
+			}
+			gm_data.b_tbl[i] = kzalloc(sizeof(uint16_t) * gm_data.tbl_size[i],
+									   GFP_KERNEL);
+			if (!gm_data.b_tbl[i]) {
+				pr_err("%s: Unable to allocate b_tbl[%d]!\n", __func__, i);
+				alloc_failed = true;
+				break;
+			}
+
+			memcpy(gm_data.r_tbl[i], pdata->panel_info.gm_data[0] + cur_offset,
+				   sizeof(uint16_t) * gm_data.tbl_size[i]);
+			memcpy(gm_data.g_tbl[i], pdata->panel_info.gm_data[1] + cur_offset,
+				   sizeof(uint16_t) * gm_data.tbl_size[i]);
+			memcpy(gm_data.b_tbl[i], pdata->panel_info.gm_data[2] + cur_offset,
+				   sizeof(uint16_t) * gm_data.tbl_size[i]);
+			cur_offset += gm_data.tbl_size[i];
+		}
+
+		if (!alloc_failed) {
+			ret = mdss_mdp_gamut_config(&gm_data, NULL);
+			if (ret)
+				pr_err("%s: failed to set gamut map, ret = %d!\n", __func__,
+						ret);
+			else {
+				pr_notice("%s: set gamut map successfully.\n", __func__);
+				pdata->panel_info.gm_flags &= ~MDSS_CC_FLAGS_GAMUT_DIRTY;
+			}
+		}
+
+		for (i=0; i < MDP_GAMUT_TABLE_NUM; i++) {
+			kfree(gm_data.r_tbl[i]);
+			kfree(gm_data.g_tbl[i]);
+			kfree(gm_data.b_tbl[i]);
+		}
+	} else
+		pr_notice("%s: gamut map does not require updating.\n", __func__);
+}
+void print_buf(const char *str, uint8_t *buf, int length)
+{
+	int i, off;
+	size_t alloc_length = strlen(str) + length * 3 + 1;
+	char *print_buf = kzalloc(alloc_length, GFP_KERNEL);
+	if (!print_buf) {
+		pr_info("%s: alloc failed\n", __func__);
+		return;
+	}
+
+	memcpy(print_buf, str, strlen(str));
+	for (i = 0; i < length; i++) {
+		off = strlen(str) + (i*3);
+		snprintf(print_buf + off, alloc_length - off, " %02x", buf[i]);
+	}
+	pr_info("%s\n", print_buf);
+	kfree(print_buf);
+}
+
+void mdss_dsi_read_serial_id(struct mdss_panel_info *pinfo)
+{
+	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
+	struct mdss_panel_data *pdata = NULL;
+
+	if (pinfo == NULL) {
+		pr_err("%s: Invalid arg\n", __func__);
+		return;
+	}
+	pdata = container_of(pinfo, struct mdss_panel_data, panel_info);
+	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata, panel_data);
+
+	if (pinfo->read_serial_id_bytes && pinfo->serial_id_length) {
+		int i, ret;
+		u8 *rbuf;
+		u8 read_length = 0;
+		for (i = 0; i < pinfo->serial_id_length; i++)
+			if (read_length < pinfo->read_serial_id_bytes[i] + 1)
+					read_length = pinfo->read_serial_id_bytes[i] + 1;
+
+		pr_info("%s: serial ID read length %d\n", __func__, read_length);
+		rbuf = kzalloc(sizeof(u8) * read_length, GFP_KERNEL);
+		if (!rbuf) {
+			pr_err("%s: failed to alloc serial ID read buffer", __func__);
+			return;
+		}
+
+		for (i = 0; i < ctrl->read_serial_cmds.cmd_cnt; i++) {
+			struct dcs_cmd_req cmdreq;
+			memset(&cmdreq, 0, sizeof(cmdreq));
+			cmdreq.cmds = ctrl->read_serial_cmds.cmds + i;
+			cmdreq.cmds_cnt = 1;
+			cmdreq.flags = CMD_REQ_COMMIT | CMD_REQ_LP_MODE;
+			if ((ctrl->read_serial_cmds.cmds[i].dchdr.dtype == DTYPE_DCS_READ) ||
+				(ctrl->read_serial_cmds.cmds[i].dchdr.dtype == DTYPE_GEN_READ) ||
+				(ctrl->read_serial_cmds.cmds[i].dchdr.dtype == DTYPE_GEN_READ1) ||
+				(ctrl->read_serial_cmds.cmds[i].dchdr.dtype == DTYPE_GEN_READ2)) {
+
+				cmdreq.flags |= CMD_REQ_RX;
+				cmdreq.rlen = read_length;
+				cmdreq.rbuf = rbuf;
+			}
+			ret = mdss_dsi_cmdlist_put(ctrl, &cmdreq);
+			if (ret <= 0) {
+				pr_err("%s Reading serial ID failed with %d\n",
+					__func__, ret);
+				kzfree(rbuf);
+				return;
+			}
+		}
+
+		if (!pinfo->serial_id)
+			pinfo->serial_id = kzalloc(sizeof(char) * pinfo->serial_id_length, GFP_KERNEL);
+
+		if (pinfo->serial_id) {
+			for (i = 0; i < pinfo->serial_id_length; i++)
+				pinfo->serial_id[i] = rbuf[pinfo->read_serial_id_bytes[i]];
+			print_buf("SID:", pinfo->serial_id, pinfo->serial_id_length);
+		} else {
+			pr_err("%s:serial id alloc failed\n", __func__);
+		}
+		kzfree(rbuf);
+	}
+}
+
+void mdss_dsi_set_partial_window(struct mdss_panel_info *pinfo, int sr, int er)
+{
+	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
+	struct mdss_panel_data *pdata = NULL;
+	int i;
+
+	if (!pinfo || sr < 0 || sr >= pinfo->yres || er <= 0 || er > pinfo->yres || er <= sr) {
+		pr_err("%s: Invalid arg pinfo = %pK, sr = %d, er = %d\n",
+			__func__, pinfo, sr, er);
+		return;
+	}
+
+	pdata = container_of(pinfo, struct mdss_panel_data, panel_info);
+	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata, panel_data);
+
+	if (sr == 0 && er == pinfo->yres) {
+		pr_info("%s: Disable\n", __func__);
+		if (ctrl->partial_window_dis_cmds.cmd_cnt)
+			mdss_dsi_panel_cmds_send(ctrl, &ctrl->partial_window_dis_cmds, CMD_REQ_COMMIT);
+
+	} else if (ctrl->partial_window_en_cmds.cmd_cnt &&
+			ctrl->partial_window_sr_bytes &&
+			ctrl->partial_window_er_bytes) {
+
+		pr_info("%s: Enable %d -> %d\n", __func__, sr, er);
+
+		/* Populate the commands with the sr and er values */
+		for (i = 0; i < ctrl->partial_window_sr_bytes_length; i++) {
+			int idx = ctrl->partial_window_sr_bytes[i];
+			/* grab the ith byte of sr and put it into the index specified by partial_window_sr_bytes */
+			ctrl->partial_window_en_cmds.buf[idx] = (sr >> (8 * i)) & 0xff;
+		}
+		for (i = 0; i < ctrl->partial_window_er_bytes_length; i++) {
+			int idx = ctrl->partial_window_er_bytes[i];
+			ctrl->partial_window_en_cmds.buf[idx] = (er >> (8 * i)) & 0xff;
+		}
+
+		mdss_dsi_panel_cmds_send(ctrl, &ctrl->partial_window_en_cmds, CMD_REQ_COMMIT);
+	}
+}
 static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 {
 	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
@@ -735,6 +979,8 @@ static int mdss_dsi_panel_on(struct mdss_panel_data *pdata)
 	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 				panel_data);
 
+	mdss_apply_pcc(pdata);
+	mdss_apply_gamut_map(pdata);
 	pr_debug("%s: ctrl=%pK ndx=%d\n", __func__, ctrl, ctrl->ndx);
 
 	if (pinfo->dcs_cmd_by_left) {
@@ -792,9 +1038,67 @@ static int mdss_dsi_panel_off(struct mdss_panel_data *pdata)
 	if (ctrl->off_cmds.cmd_cnt)
 		mdss_dsi_panel_cmds_send(ctrl, &ctrl->off_cmds, CMD_REQ_COMMIT);
 
+	pdata->panel_info.panel_glass_on = 0;
+	if (synaptics_rmi4_glass_on_notif != NULL)
+		synaptics_rmi4_glass_on_notif(true);
 end:
 	pinfo->blank_state = MDSS_PANEL_BLANK_BLANK;
 	pr_debug("%s:-\n", __func__);
+	return 0;
+}
+static int mdss_dsi_glass_on(struct mdss_panel_data *pdata)
+{
+	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
+	struct mdss_panel_info *pinfo;
+	int ret;
+
+	if (pdata == NULL) {
+		pr_err("%s: Invalid input data\n", __func__);
+		return -EINVAL;
+	}
+
+	pinfo = &pdata->panel_info;
+	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata,
+				panel_data);
+
+	pr_debug("%s: ctrl=%pK ndx=%d\n", __func__, ctrl, ctrl->ndx);
+
+	if (pinfo->dcs_cmd_by_left) {
+		if (ctrl->ndx != DSI_CTRL_LEFT)
+			goto end;
+	}
+
+	if (ctrl->glass_on_cmds.cmd_cnt) {
+		struct dcs_cmd_req cmdreq;
+
+		memset(&cmdreq, 0, sizeof(cmdreq));
+		cmdreq.cmds = ctrl->glass_on_cmds.cmds;
+		cmdreq.cmds_cnt = ctrl->glass_on_cmds.cmd_cnt;
+		cmdreq.flags = CMD_REQ_COMMIT;
+
+		if (ctrl->glass_on_cmds.link_state == DSI_HS_MODE)
+			cmdreq.flags |= CMD_REQ_HS_MODE;
+		else
+			cmdreq.flags |= CMD_REQ_LP_MODE;
+
+		cmdreq.rlen = 0;
+		cmdreq.cb = NULL;
+
+		ret = mdss_dsi_cmdlist_put(ctrl, &cmdreq);
+		if (ret <= 0) {
+			pr_err("%s Sending disp_on failed with %d\n",
+					__func__, ret);
+			return ret;
+		}
+	}
+
+	pdata->panel_info.panel_glass_on = 1;
+	pdata->panel_info.panel_recovery = false;
+	if (synaptics_rmi4_glass_on_notif != NULL)
+		synaptics_rmi4_glass_on_notif(false);
+end:
+	/* Print this all the time so we know how long the wakeup took */
+	pr_info("%s:-\n", __func__);
 	return 0;
 }
 
@@ -1465,6 +1769,184 @@ static int mdss_dsi_parse_panel_features(struct device_node *np,
 	return 0;
 }
 
+static int mdss_panel_parse_bbry_lcd_id(struct device_node *np,
+			struct mdss_dsi_ctrl_pdata *ctrl_pdata)
+{
+	int rc;
+	u32 mfg, class;
+	struct mdss_panel_info *pinfo = &(ctrl_pdata->panel_data.panel_info);
+
+	rc = of_property_read_u32(np, "oem,mdss-dsi-bbry-lcd-id-class", &class);
+	if (rc) {
+		pr_notice("%s:%d, bbry-lcd-id-class not specified in dt\n",	__func__, __LINE__);
+		class = 0;
+	}
+
+	rc = of_property_read_u32(np, "oem,mdss-dsi-bbry-lcd-id-mfg", &mfg);
+	if (rc) {
+		pr_notice("%s:%d, bbry-lcd-id-mfg not specified in dt\n",	__func__, __LINE__);
+		mfg = 0;
+	}
+
+	pinfo->bbry_lcd_id = (mfg & 0xff) | ((class & 0xfff) << 8);
+
+	/*TODO Handle cases where there are different revs of panels.
+	 * Handle cases where we must determine class/mfg by reading some panel register. */
+	return 0;
+}
+
+static int mdss_panel_parse_panel_color_points(struct device_node *np,
+			struct mdss_panel_info *pinfo)
+{
+	int num = 0;
+	int rc = 0;
+	int i;
+	int j;
+	struct property *data;
+	u32 tmp[MDSS_COLOR_POINT_TABLE_SIZE];
+
+	data = of_find_property(np, "oem,mdss-dsi-bbry-color-points", &num);
+	num /= sizeof(u32);
+	if (!data || !num || num > MDSS_COLOR_POINT_TABLE_SIZE) {
+		pr_debug("%s:%d, not able to read oem,mdss-dsi-bbry-color-points, "
+				 "length found = %d, not enabling color correction\n",
+				 __func__, __LINE__, num);
+	} else {
+		memset( pinfo->color_points, 0, MDSS_COLOR_POINT_TABLE_SIZE);
+		if (num < MDSS_COLOR_POINT_TABLE_SIZE)
+			pr_err("%s: Not enough color point data in dtsi\n", __func__);
+		else {
+			rc = of_property_read_u32_array(np, "oem,mdss-dsi-bbry-color-points",
+					tmp, num);
+			if (rc)
+				pr_debug("%s:%d, error reading oem,mdss-dsi-bbry-color-points, rc = %d\n",
+						__func__, __LINE__, rc);
+			else {
+				for (i = 0, j = 0;
+						(i < num) && (j < MDSS_MAX_COLOR_POINTS); j++ ) {
+
+					pinfo->color_points[j].rgb[0] = tmp[i++];
+					pinfo->color_points[j].rgb[1] = tmp[i++];
+					pinfo->color_points[j].rgb[2] = tmp[i++];
+
+					pinfo->color_points[j].xyY[0] = tmp[i++];
+					pinfo->color_points[j].xyY[1] = tmp[i++];
+					pinfo->color_points[j].xyY[2] = tmp[i++];
+				}
+			}
+		}
+	}
+
+    return 0;
+}
+
+static int mdss_panel_parse_panel_pcc(struct device_node *np,
+			struct mdss_panel_info *pinfo)
+{
+	int num = 0;
+	int rc;
+	struct property *data;
+	u32 tmp[MDSS_PCC_DATA_TABLE_SIZE];
+
+	data = of_find_property(np, "qcom,mdss-dsi-bbry-pcc-data", &num);
+	num /= sizeof(u32);
+	if (!data || !num || num > MDSS_PCC_DATA_TABLE_SIZE) {
+		pr_debug("%s:%d, not able to read qcom,mdss-dsi-bbry-pcc-data, "
+				 "length found = %d, not enabling color correction\n",
+				 __func__, __LINE__, num);
+		pinfo->pcc_enabled = false;
+	} else {
+		rc = of_property_read_u32_array(np, "qcom,mdss-dsi-bbry-pcc-data", tmp, num);
+		if (rc)
+			pr_debug("%s:%d, error reading qcom,mdss-dsi-bbry-pcc-data, rc = %d\n",
+				      __func__, __LINE__, rc);
+		else {
+			memcpy(&pinfo->pcc_data[0].c, &tmp[0],
+					sizeof(u32)*MDSS_PCC_DATA_TABLE_SIZE/3);
+			memcpy(&pinfo->pcc_data[1].c, &tmp[12],
+					sizeof(u32)*MDSS_PCC_DATA_TABLE_SIZE/3);
+			memcpy(&pinfo->pcc_data[2].c, &tmp[24],
+					sizeof(u32)*MDSS_PCC_DATA_TABLE_SIZE/3);
+			pinfo->pcc_enabled = true;
+		}
+	}
+	return 0;
+}
+#define MDSS_GAMUT_MAP_SIZE 729
+static int mdss_panel_parse_gamut_map(struct device_node *np,
+			struct mdss_panel_info *pinfo)
+{
+	int num = 0;
+	int rc;
+	int	i;
+	struct property *data;
+	uint32_t *tmp;
+	uint16_t *r_dst;
+	uint16_t *g_dst;
+	uint16_t *b_dst;
+
+	data = of_find_property(np, "oem,mdss-dsi-panel-gamut-map", &num);
+	num /= sizeof(uint32_t);
+	if (!data || !num || num > MDSS_GAMUT_MAP_SIZE * 3) {
+		pr_debug("%s:%d, not able to read oem,mdss-dsi-panel-gamut-map, "
+				 "length found = %d, not enabling color correction\n",
+				 __func__, __LINE__, num);
+		pinfo->gm_flags &= ~MDSS_CC_FLAGS_GAMUT_DIRTY;
+	} else {
+		tmp = kzalloc(sizeof(uint32_t) * MDSS_GAMUT_MAP_SIZE * 3, GFP_KERNEL);
+		if (!tmp) {
+			pr_err("%s:%d, allocation failed\n", __func__, __LINE__);
+			return -ENOMEM;
+		}
+		rc = of_property_read_u32_array(np, "oem,mdss-dsi-panel-gamut-map", tmp, num);
+		if (rc)
+			pr_debug("%s:%d, error reading oem,mdss-dsi-panel-gamut-map, rc = %d\n",
+				      __func__, __LINE__, rc);
+		else {
+			pinfo->gm_data[0] = kzalloc(sizeof(uint32_t) * MDSS_GAMUT_MAP_SIZE,
+										GFP_KERNEL);
+			if (!pinfo->gm_data[0]) {
+				pr_err("%s:%d, allocation failed", __func__, __LINE__);
+				kfree(tmp);
+				return -ENOMEM;
+			}
+			pinfo->gm_data[1] = kzalloc(sizeof(uint32_t) * MDSS_GAMUT_MAP_SIZE,
+										GFP_KERNEL);
+			if (!pinfo->gm_data[1]) {
+				pr_err("%s:%d, allocation failed", __func__, __LINE__);
+				kfree(tmp);
+				kfree(pinfo->gm_data[0]);
+				return -ENOMEM;
+			}
+			pinfo->gm_data[2] = kzalloc(sizeof(uint32_t) * MDSS_GAMUT_MAP_SIZE,
+										GFP_KERNEL);
+			if (!pinfo->gm_data[2]) {
+				pr_err("%s:%d, allocation failed", __func__, __LINE__);
+				kfree(tmp);
+				kfree(pinfo->gm_data[0]);
+				kfree(pinfo->gm_data[1]);
+				return -ENOMEM;
+			}
+			/* Copy the gamut map from the 32 bits read out of the dtsi
+			 * to the 16 bits required by QC API.  Note that this
+			 * contradicts the sample code in the Display Post
+			 * Processing Features document but is actually required to
+			 * get valid results once the hardware is programmed.
+			 */
+			r_dst = pinfo->gm_data[0];
+			g_dst = pinfo->gm_data[1];
+			b_dst = pinfo->gm_data[2];
+			for(i=0; i < MDSS_GAMUT_MAP_SIZE; i++) {
+				*r_dst++ = (uint16_t)tmp[i];
+				*g_dst++ = (uint16_t)tmp[i+MDSS_GAMUT_MAP_SIZE];
+				*b_dst++ = (uint16_t)tmp[i+MDSS_GAMUT_MAP_SIZE*2];
+			}
+			pinfo->gm_flags = MDSS_CC_FLAGS_GAMUT_DIRTY;
+			kfree(tmp);
+		}
+	}
+	return 0;
+}
 static void mdss_dsi_parse_panel_horizintal_line_idle(struct device_node *np,
 	struct mdss_dsi_ctrl_pdata *ctrl)
 {
@@ -1811,6 +2293,7 @@ static int mdss_panel_parse_dt(struct device_node *np,
 	static const char *pdest;
 	struct mdss_panel_info *pinfo = &(ctrl_pdata->panel_data.panel_info);
 
+	mdss_panel_parse_bbry_lcd_id(np, ctrl_pdata);
 	rc = mdss_dsi_panel_parse_display_timings(np,
 					&ctrl_pdata->panel_data);
 	if (rc)
@@ -2068,12 +2551,32 @@ static int mdss_panel_parse_dt(struct device_node *np,
 	pinfo->mipi.force_clk_lane_hs = of_property_read_bool(np,
 		"qcom,mdss-dsi-force-clock-lane-hs");
 
+	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->glass_on_cmds,
+		"oem,mdss-dsi-glass-on-command",
+		"oem,mdss-dsi-glass-on-command-state");
 	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->on_to_lpm_cmds,
 		"oem,mdss-dsi-on-to-lpm-command",
 		"oem,mdss-dsi-on-to-lpm-command-state");
 	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->lpm_to_on_cmds,
 		"oem,mdss-dsi-lpm-to-on-command",
 		"oem,mdss-dsi-lpm-to-on-command-state");
+	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->read_serial_cmds,
+		"oem,mdss-dsi-read-serial-command",
+		NULL);
+	pinfo->read_serial_id_bytes = of_get_property(np, "oem,mdss-dsi-read-serial-id-bytes", &pinfo->serial_id_length);
+
+	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->partial_window_en_cmds,
+		"oem,mdss-dsi-partial-window-en-command",
+		"oem,mdss-dsi-partial-window-en-command-state");
+	ctrl_pdata->partial_window_sr_bytes = of_get_property(np, "oem,mdss-dsi-partial-window-sr-bytes", &ctrl_pdata->partial_window_sr_bytes_length);
+	ctrl_pdata->partial_window_er_bytes = of_get_property(np, "oem,mdss-dsi-partial-window-er-bytes", &ctrl_pdata->partial_window_er_bytes_length);
+	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->partial_window_dis_cmds,
+		"oem,mdss-dsi-partial-window-dis-command",
+		"oem,mdss-dsi-partial-window-dis-command-state");
+
+	mdss_panel_parse_panel_pcc(np, pinfo);
+	mdss_panel_parse_gamut_map(np, pinfo);
+	mdss_panel_parse_panel_color_points(np, pinfo);
 
 	rc = mdss_dsi_parse_panel_features(np, ctrl_pdata);
 	if (rc) {
@@ -2145,6 +2648,9 @@ int mdss_dsi_panel_init(struct device_node *node,
 
 	ctrl_pdata->on = mdss_dsi_panel_on;
 	ctrl_pdata->off = mdss_dsi_panel_off;
+	ctrl_pdata->glass_on = mdss_dsi_glass_on;
+	ctrl_pdata->panel_data.panel_info.set_partial_window = mdss_dsi_set_partial_window;
+	ctrl_pdata->panel_data.panel_info.read_serial_id = mdss_dsi_read_serial_id;
 	ctrl_pdata->low_power_config = mdss_dsi_panel_low_power_config;
 	ctrl_pdata->panel_data.set_backlight = mdss_dsi_panel_bl_ctrl;
 	ctrl_pdata->switch_mode = mdss_dsi_panel_switch_mode;

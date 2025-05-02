@@ -312,6 +312,7 @@ struct mdss_dsi_ctrl_pdata {
 	int ndx;	/* panel_num */
 	int (*on) (struct mdss_panel_data *pdata);
 	int (*off) (struct mdss_panel_data *pdata);
+	int (*glass_on) (struct mdss_panel_data *pdata);
 	int (*low_power_config) (struct mdss_panel_data *pdata, int enable);
 	int (*set_col_page_addr)(struct mdss_panel_data *pdata, bool force);
 	int (*check_status) (struct mdss_dsi_ctrl_pdata *pdata);
@@ -348,6 +349,8 @@ struct mdss_dsi_ctrl_pdata {
 	int disp_te_gpio;
 	int rst_gpio;
 	int disp_en_gpio;
+	int err_gpio;
+	char last_read_buf[85];
 	int bklt_en_gpio;
 	int mode_gpio;
 	int bklt_ctrl;	/* backlight ctrl */
@@ -382,7 +385,9 @@ struct mdss_dsi_ctrl_pdata {
 	struct dsi_panel_cmds on_cmds;
 	struct dsi_panel_cmds post_dms_on_cmds;
 	struct dsi_panel_cmds off_cmds;
+	struct dsi_panel_cmds glass_on_cmds;
 	struct dsi_panel_cmds on_to_lpm_cmds, lpm_to_on_cmds;
+	struct dsi_panel_cmds read_serial_cmds;
 	struct dsi_panel_cmds partial_window_en_cmds, partial_window_dis_cmds;
 	const u8 *partial_window_sr_bytes, *partial_window_er_bytes;
 	int partial_window_sr_bytes_length, partial_window_er_bytes_length;

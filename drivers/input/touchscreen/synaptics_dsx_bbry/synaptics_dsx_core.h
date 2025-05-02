@@ -103,7 +103,7 @@
 /* stats period and size (i.e. number of entries in stat buffer)
  * total stats time is stats period * stats size
  */
-#define SYNAPTICS_STATS_PERIOD  5000	/* 5000 ms period */
+#define SYNAPTICS_STATS_PERIOD  10000	/* 10000 ms period */
 #define SYNAPTICS_STATS_SIZE	60	/* 60 entries in the buffer */
 #define SYNAPTICS_STATS_WAIT    10	/* 10 ms wait */
 

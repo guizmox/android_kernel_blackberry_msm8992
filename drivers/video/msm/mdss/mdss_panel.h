@@ -18,6 +18,7 @@
 #include <linux/stringify.h>
 #include <linux/types.h>
 #include <linux/debugfs.h>
+#include <linux/msm_mdp.h>
 
 /* panel id type */
 struct panel_id {
@@ -31,6 +32,10 @@ struct panel_id {
 #define MDSS_DSI_RST_SEQ_LEN	10
 /* worst case prefill lines for all chipsets including all vertical blank */
 #define MDSS_MDP_MAX_PREFILL_FETCH 25
+#define MDSS_PCC_DATA_TABLE_SIZE    36 /* 12 each for r, g and b colour channels */
+#define MDSS_MAX_COLOR_POINTS 11  /* 11 color points, 6 values for each*/
+#define MDSS_COLOR_POINT_TABLE_SIZE MDSS_MAX_COLOR_POINTS * 6 /* 6 values for each color point */
+
 
 #define OVERRIDE_CFG	"override"
 #define SIM_PANEL	"sim"
@@ -295,6 +300,11 @@ enum dynamic_switch_modes {
 	SWITCH_RESOLUTION,
 };
 
+#define MDSS_CC_FLAGS_GAMUT_DIRTY	0x0001
+struct color_point {
+    u32 rgb[3];
+    u32 xyY[3];
+};
 struct mipi_panel_info {
 	char boot_mode;	/* identify if mode switched from starting mode */
 	char mode;		/* video/cmd */
@@ -471,6 +481,13 @@ struct mdss_panel_info {
 	struct ion_handle *splash_ihdl;
 	int panel_power_state;
 	int blank_state;
+	u32 panel_glass_on;
+	bool pcc_enabled;
+	struct mdp_pcc_coeff pcc_data[3]; /* r, g and b structures */
+	uint16_t *gm_data[3];
+	uint16_t gm_flags;
+	struct color_point color_points[MDSS_MAX_COLOR_POINTS];
+	uint32_t panel_recovery;
 
 	uint32_t panel_dead;
 	u32 panel_force_dead;
@@ -487,6 +504,12 @@ struct mdss_panel_info {
 	char panel_name[MDSS_MAX_PANEL_LEN];
 	struct mdss_mdp_pp_tear_check te;
 
+	u32 bbry_lcd_id;
+	void (*set_partial_window) (struct mdss_panel_info *pinfo, int sr, int er);
+	void (*read_serial_id) (struct mdss_panel_info *pinfo);
+	const u8 *read_serial_id_bytes;               /* which bytes to pick out of the value we read */
+	u8 *serial_id;
+	int serial_id_length;
 	struct lcd_panel_info lcdc;
 	struct fbc_panel_info fbc;
 	struct mipi_panel_info mipi;
@@ -544,6 +567,8 @@ struct mdss_panel_data {
 	 * and teardown.
 	 */
 	int (*event_handler) (struct mdss_panel_data *pdata, int e, void *arg);
+	struct work_struct panel_recovery_work;
+	struct platform_device *fb_pdev;
 
 	struct list_head timings_list;
 	struct mdss_panel_timing *current_timing;

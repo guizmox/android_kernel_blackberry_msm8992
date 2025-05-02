@@ -759,7 +759,270 @@ static ssize_t mdss_fb_get_dfps_mode(struct device *dev,
 
 	return ret;
 }
+static ssize_t get_bbry_lcd_id(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+	struct mdss_panel_info *pinfo = mfd->panel_info;
+	return snprintf(buf, PAGE_SIZE, "0x%08x\n", pinfo->bbry_lcd_id);
+}
 
+/* The spec for the Logan panel is that the U coordinate is 0.196 +/- 0.015
+ * and the V coordinate is 0.4630 +/- 0.015.  The values read from the panel
+ * are shifted right 4 decimal places (i.e 1000 = 0.1000)
+ */
+#define LOGAN_U_MIN 0x799  /* 1945 = (1960 - 15) */
+#define LOGAN_U_MAX 0x7B7  /* 1975 = (1960 + 15) */
+#define LOGAN_V_MIN 0x1207 /* 4615 = (4630 - 15) */
+#define LOGAN_V_MAX 0x1225 /* 4645 = (4630 + 15) */
+
+static ssize_t get_white_point(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+	struct mdss_panel_info *pinfo = mfd->panel_info;
+	int offset = 0;
+	int u_coord = 0, v_coord = 0;
+
+	if (!pinfo->serial_id)
+		pinfo->read_serial_id(pinfo);
+
+	if (pinfo->serial_id) {
+		/* The last 4 bytes of the serial id contain the white point values */
+		int wp_start = pinfo->serial_id_length - 4;
+		u_coord = (pinfo->serial_id[wp_start] << 8)
+			    + pinfo->serial_id[wp_start + 1];
+		v_coord = (pinfo->serial_id[wp_start + 2] << 8)
+			    + pinfo->serial_id[wp_start + 3];
+
+		if ((u_coord < LOGAN_U_MIN) || (u_coord > LOGAN_U_MAX)) {
+			pr_err("White point u coordinate (%d) outside of range, "
+				   "setting white point to 0\n", u_coord);
+			u_coord = 0;
+			v_coord = 0;
+		}
+
+		if ((v_coord < LOGAN_V_MIN) || (v_coord > LOGAN_V_MAX)) {
+			pr_err("White point v coordinate (%d) outside of range, "
+				   "setting white point to 0\n", v_coord);
+			u_coord = 0;
+			v_coord = 0;
+		}
+
+	}
+
+	offset += snprintf(buf+offset, 14, "0x%04X 0x%04X", u_coord, v_coord);
+	offset += snprintf(buf+offset, 2, "\n");
+	return offset;
+}
+
+static ssize_t get_serial_id(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+	struct mdss_panel_info *pinfo = mfd->panel_info;
+	int i, offset = 0;
+
+	if (!pinfo->serial_id)
+		pinfo->read_serial_id(pinfo);
+
+	if (pinfo->serial_id)
+		for (i = 0; i < min(pinfo->serial_id_length, 11); i++)
+			offset += snprintf(buf+offset, 5, "0x%02X", pinfo->serial_id[i]);
+
+	offset += snprintf(buf+offset, 2, "\n");
+	return offset;
+}
+
+static ssize_t set_trigger_reset(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+
+	char *envp[2] = {"PANEL_ALIVE=0", NULL};
+
+	pr_err("Triggered reset via sysfs\n");
+	mfd->panel_info->panel_dead = true;
+	kobject_uevent_env(&fbi->dev->kobj, KOBJ_CHANGE, envp);
+
+	return count;
+}
+#ifdef CONFIG_BBRY_DEBUG
+static int get_param(char *out, const char *in) {
+	int	i = 0;
+	while ((in[i] != ' ') && (in[i] != 0)) {
+		out[i] = in[i];
+		i++;
+	}
+
+	out[i] = '\0';
+	return i+1;
+}
+
+/* Write commands are of the form:
+ * echo CMD DATA1 DATA2 DATA3 ... DATA_N > /sys/class/graphics/fb0/dsi_write
+ * where CMD is one of the DTYPE_ defines in mdss_dsi_cmd.h
+ *
+ * Read commands are of the form:
+ * echo CMD DATA1 DATA2 ... DATA_N READ_LEN > /sys/class/graphics/fb0/dsi_write
+ * followed by:
+ * cat /sys/class/graphics/fb0/dsi_read
+ * CMD is one of the DTYPE_ read defines in mdss_dsi_cmd.h and READ_LEN is the
+ * number of bytes expected back from the read command.  In general read
+ * commands will usually be only 4 bytes: CMD DATA1 DATA2 READ_LEN where DATA1
+ * is the register/command to send to the peripheral and DATA2 is usually 0.
+ */
+static ssize_t set_dsi_write(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+	struct mdss_panel_info *pinfo = mfd->panel_info;
+	struct mdss_panel_data *pdata =
+			container_of(pinfo, struct mdss_panel_data, panel_info);
+	struct dcs_cmd_req cmdreq;
+	struct dsi_cmd_desc cmds;
+	char cmds_buf[80] = {0};
+	char tmp[6];
+	int	cur_i = 0;
+	int	i = 0;
+	int	j = 0;
+	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
+	ssize_t ret;
+
+	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata,
+						panel_data);
+
+	memset(&cmdreq, 0, sizeof(cmdreq));
+
+	/* Parsing the command out of buf, the first byte should be
+	 * command type and remaining bytes are the payload.
+	 */
+	cur_i += get_param(tmp, buf);
+	if (cur_i != 0) {
+		ret = kstrtou8(tmp, 0, &cmds.dchdr.dtype);
+		if (ret) {
+			pr_err("Error reading command parameters.\n");
+			return -EINVAL;
+		}
+	} else {
+		pr_err("Unable to find command type in buffer.\n");
+		return -EINVAL;
+	}
+	cmds.dchdr.dlen = 0;
+
+	for (i = 0; i < sizeof(cmds_buf); i++) {
+		j = get_param(tmp, &buf[cur_i]);
+		if (j > 1) {
+			cmds.dchdr.dlen++;
+			cur_i += j;
+			ret = kstrtou8(tmp, 0, &cmds_buf[i]);
+			if (ret) {
+				pr_err("Error reading command parameters.\n");
+				return -EINVAL;
+			}
+		} else
+			break;
+	}
+
+	cmds.dchdr.vc = 0;
+	cmds.dchdr.ack = 0;
+	cmds.dchdr.wait = 0;
+	cmds.dchdr.last = 1;
+	cmds.payload = cmds_buf;
+
+	cmdreq.cmds = &cmds;
+	cmdreq.cmds_cnt = 1; /* only one command at a time through this command*/
+	cmdreq.flags = CMD_REQ_COMMIT | CMD_REQ_LP_MODE;
+	cmdreq.rlen = 0;
+	cmdreq.cb = NULL;
+
+	if ((cmds.dchdr.dtype == DTYPE_DCS_READ) ||
+		(cmds.dchdr.dtype == DTYPE_GEN_READ) ||
+		(cmds.dchdr.dtype == DTYPE_GEN_READ1) ||
+		(cmds.dchdr.dtype == DTYPE_GEN_READ2)) {
+			cmds.dchdr.ack = 1;
+			cmdreq.rlen = cmds_buf[--cmds.dchdr.dlen];
+			ctrl->last_read_buf[0] = cmdreq.rlen;
+			cmdreq.rbuf = &ctrl->last_read_buf[1];
+			cmdreq.flags = CMD_REQ_RX | CMD_REQ_COMMIT;
+	}
+
+	ret = mdss_dsi_cmdlist_put(ctrl, &cmdreq);
+
+	if (cmdreq.flags & CMD_REQ_RX) ctrl->last_read_buf[0] = ret;
+
+	return count;
+}
+
+static ssize_t get_dsi_read(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	int i = 0;
+	int offset = 0;
+
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+	struct mdss_panel_info *pinfo = mfd->panel_info;
+	struct mdss_panel_data *pdata =
+			container_of(pinfo, struct mdss_panel_data, panel_info);
+	struct mdss_dsi_ctrl_pdata *ctrl = NULL;
+	char   zero_bytes[] = "Last read returned 0 bytes\n";
+
+	ctrl = container_of(pdata, struct mdss_dsi_ctrl_pdata,
+						panel_data);
+
+	if (ctrl->last_read_buf[0] == 0) {
+		snprintf(&buf[offset], sizeof(zero_bytes), "%s", zero_bytes);
+		offset = sizeof(zero_bytes);
+	} else {
+		for (i = 1; i < sizeof(ctrl->last_read_buf); i++) {
+			if (i > ctrl->last_read_buf[0]) break;
+			snprintf(&buf[offset], 6, "0x%02X ", ctrl->last_read_buf[i]);
+			offset += 5;
+		}
+
+		snprintf(&buf[offset++], 2, "\n");
+	}
+
+	return offset;
+}
+#endif
+
+static ssize_t get_color_points(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	int i = 0;
+	int offset = 0;
+	int inc;
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+	struct mdss_panel_info *pinfo = mfd->panel_info;
+
+	for (i = 0; i < MDSS_MAX_COLOR_POINTS ; i++) {
+			inc = snprintf(&buf[offset], 5, "%3d ", pinfo->color_points[i].rgb[0]);
+			offset += inc;
+			inc = snprintf(&buf[offset], 5, "%3d ", pinfo->color_points[i].rgb[1]);
+			offset += inc;
+			inc = snprintf(&buf[offset], 5, "%3d ", pinfo->color_points[i].rgb[2]);
+			offset += inc;
+
+			inc = snprintf(&buf[offset], 9, "%7d ", pinfo->color_points[i].xyY[0]);
+			offset += inc;
+			inc = snprintf(&buf[offset], 9, "%7d ", pinfo->color_points[i].xyY[1]);
+			offset += inc;
+			inc = snprintf(&buf[offset], 9, "%7d ", pinfo->color_points[i].xyY[2]);
+			offset += inc;
+			inc = snprintf(&buf[offset], 2, "\n");
+			offset += inc;
+	}
+
+	return offset;
+}
 static DEVICE_ATTR(msm_fb_type, S_IRUGO, mdss_fb_get_type, NULL);
 static DEVICE_ATTR(msm_fb_split, S_IRUGO | S_IWUSR, mdss_fb_show_split,
 					mdss_fb_store_split);
@@ -776,6 +1039,15 @@ static DEVICE_ATTR(msm_fb_panel_status, S_IRUGO | S_IWUSR,
 	mdss_fb_get_panel_status, mdss_fb_force_panel_dead);
 static DEVICE_ATTR(msm_fb_dfps_mode, S_IRUGO | S_IWUSR,
 	mdss_fb_get_dfps_mode, mdss_fb_change_dfps_mode);
+static DEVICE_ATTR(bbry_lcd_id, S_IRUGO, get_bbry_lcd_id, NULL);
+static DEVICE_ATTR(serial_id, S_IRUGO, get_serial_id, NULL);
+static DEVICE_ATTR(white_point, S_IRUGO, get_white_point, NULL);
+static DEVICE_ATTR(trigger_reset, S_IWUSR | S_IWGRP, NULL, set_trigger_reset);
+#ifdef CONFIG_BBRY_DEBUG
+static DEVICE_ATTR(dsi_write, S_IRUGO | S_IWUSR, NULL, set_dsi_write);
+static DEVICE_ATTR(dsi_read, S_IRUGO | S_IWUSR, get_dsi_read, NULL);
+#endif
+static DEVICE_ATTR(color_points, S_IRUGO, get_color_points, NULL);
 static struct attribute *mdss_fb_attrs[] = {
 	&dev_attr_msm_fb_type.attr,
 	&dev_attr_msm_fb_split.attr,
@@ -794,10 +1066,32 @@ static struct attribute_group mdss_fb_attr_group = {
 	.attrs = mdss_fb_attrs,
 };
 
+static struct attribute *mdss_fb_attrs_internal[] = {
+	&dev_attr_bbry_lcd_id.attr,
+	&dev_attr_serial_id.attr,
+	&dev_attr_trigger_reset.attr,
+	&dev_attr_white_point.attr,
+#ifdef CONFIG_BBRY_DEBUG
+	&dev_attr_dsi_write.attr,
+	&dev_attr_dsi_read.attr,
+#endif
+	&dev_attr_color_points.attr,
+	NULL,
+};
+static struct attribute_group mdss_fb_attr_internal_group = {
+	.attrs = mdss_fb_attrs_internal
+};
 static int mdss_fb_create_sysfs(struct msm_fb_data_type *mfd)
 {
 	int rc;
 
+	if ((mfd->panel.type == MIPI_VIDEO_PANEL) || (mfd->panel.type == MIPI_CMD_PANEL)) {
+		rc = sysfs_create_group(&mfd->fbi->dev->kobj, &mdss_fb_attr_internal_group);
+		if (rc) {
+			pr_err("sysfs mdss_fb_attr_internal_group creation failed, rc=%d\n", rc);
+			return rc;
+		}
+	}
 	rc = sysfs_create_group(&mfd->fbi->dev->kobj, &mdss_fb_attr_group);
 	if (rc)
 		pr_err("sysfs group creation failed, rc=%d\n", rc);
@@ -1697,6 +1991,17 @@ static int mdss_fb_blank_sub(int blank_mode, struct fb_info *info,
 		}
 
 		ret = mdss_fb_blank_blank(mfd, req_power_state);
+		/* transition from ON to ALPM, add a backlight setting */
+		if (cur_power_state == MDSS_PANEL_POWER_ON) {
+			/* Logan-specific: If we are transitioning from ON->ALPM, make sure
+			 * reapply the brightness value, since there is a different brightness
+			 * control mechanism in ALPM and ON mode. */
+			struct mdss_panel_data *pdata = dev_get_platdata(&mfd->pdev->dev);
+			if ((pdata) && (pdata->set_backlight)) {
+				pr_info("on --> lp: ALPM brightness %d\n", backlight_led.brightness);
+				pdata->set_backlight(pdata, mfd->bl_level_scaled);
+			}
+		}
 		break;
 	case FB_BLANK_HSYNC_SUSPEND:
 	case FB_BLANK_POWERDOWN:
@@ -1794,6 +2099,7 @@ void mdss_fb_free_fb_ion_memory(struct msm_fb_data_type *mfd)
 	dma_buf_put(mfd->fbmem_buf);
 	ion_free(mfd->fb_ion_client, mfd->fb_ion_handle);
 	mfd->fb_ion_handle = NULL;
+	mfd->fbmem_buf = NULL;
 }
 
 int mdss_fb_alloc_fb_ion_memory(struct msm_fb_data_type *mfd, size_t fb_size)
@@ -4047,7 +4353,23 @@ int mdss_fb_do_ioctl(struct fb_info *info, unsigned int cmd,
 
 		ret = mdss_fb_mode_switch(mfd, dsi_mode);
 		break;
+		/* GT
+	case MSMFB_PARTIAL_WINDOW:
+	{
+		struct partial_window_data partial_window;
+		ret = copy_from_user(&partial_window, argp, sizeof(partial_window));
+		if (ret) {
+			pr_err("%s: MSMFB_PARTIAL_WINDOW ioctl failed\n", __func__);
+			goto exit;
+		}
 
+		if (pdata->panel_info.set_partial_window)
+			pdata->panel_info.set_partial_window(&pdata->panel_info,
+							partial_window.sr, partial_window.er);
+		ret = 0;
+		break;
+	}
+	*/
 	default:
 		if (mfd->mdp.ioctl_handler)
 			ret = mfd->mdp.ioctl_handler(mfd, cmd, argp);
@@ -4155,6 +4477,7 @@ int mdss_register_panel(struct platform_device *pdev,
 			fb_pdev->dev.platform_data = pdata;
 	}
 
+	 pdata->fb_pdev = fb_pdev;
 	if (master_panel && mdp_instance->panel_register_done)
 		mdp_instance->panel_register_done(pdata);
 

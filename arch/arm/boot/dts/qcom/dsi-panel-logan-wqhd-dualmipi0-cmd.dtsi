@@ -23,6 +23,7 @@
 		qcom,mdss-dsi-panel-framerate = <60>;
 		qcom,partial-update-enabled;
 		qcom,partial-update-roi-merge;
+		qcom,mdss-dsi-pan-enable-dynamic-fps;
 		qcom,panel-roi-alignment = <8 8 0 0 8 0>;
 		qcom,mdss-dsi-panel-clockrate = <830000000>;
 		qcom,mdss-dsi-stream = <0>;
