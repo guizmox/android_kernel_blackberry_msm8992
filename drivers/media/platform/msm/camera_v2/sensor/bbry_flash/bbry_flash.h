@@ -102,6 +102,7 @@ struct bbry_flash_ctrl_t {
 	uint32_t low_max_current;	/* max current in flash_low mode */
 	uint32_t torch_max_current;	/* max current in torch_on mode */
 	bool use_fixed_ratio;
+	bool keep_alive;
 	uint32_t preflash_divisor;
 	struct bbry_flash_mitigation_t flash_mitigation;
 	struct bbry_flash_mitigation_t torch_mitigation;

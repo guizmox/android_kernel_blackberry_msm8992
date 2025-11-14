@@ -87,29 +87,33 @@
 		qcom,clk-freq-out = <400000>;
 		qcom,disable-dma;
 
-		max77387_flash0: max77387_flash@4A {
-			flash-type = "MAX77387";
-			max-current = <2000>;
-			default-current = <2000>;
-			use-for-videolight;
-		};
+		max77387@4a {
+			compatible = "maxim,max77387";
+			reg = <0x4a>;
 
-		max77387_torch0: max77387_torch@4A {
-			flash-type = "MAX77387";
-			max-current = <200>;
-			default-current = <200>;
-		};
+			flash0: flash@0 {
+				flash-type = "MAX77387";
+				max-current = <2000>;
+				default-current = <2000>;
+			};
 
-		max77387_flash1: max77387_flash@4A {
-			flash-type = "MAX77387";
-			max-current = <2000>;
-			default-current = <2000>;
-		};
+			torch0: torch@0 {
+				flash-type = "MAX77387";
+				max-current = <200>;
+				default-current = <200>;
+			};
 
-		max77387_torch1: max77387_torch@4A {
-			flash-type = "MAX77387";
-			max-current = <200>;
-			default-current = <200>;
+			flash1: flash@1 {
+				flash-type = "MAX77387";
+				max-current = <2000>;
+				default-current = <2000>;
+			};
+
+			torch1: torch@1 {
+				flash-type = "MAX77387";
+				max-current = <200>;
+				default-current = <200>;
+			};
 		};
 	};
 
@@ -163,6 +167,7 @@
 					qcom,default-led-trigger =
 							"flash1_trigger";
 					qcom,max-current = <2000>;
+					use-for-videolight;
 					label = "flash";
 					qcom,current = <2000>;
 					qcom,duration = <494>;
@@ -189,8 +194,8 @@
 	led_flash0: camera-flash {
 		cell-index = <0>;
 		compatible = "camera-flash";
-		flash-source = <&max77387_flash0 &pmi8994_flash1>;
-		torch-source = <&max77387_torch0 &pmi8994_torch1>;
+    	flash-source = <&flash0 &pmi8994_flash0>;
+    	torch-source = <&torch0 &pmi8994_torch0>;
 		high-max-current = <2000>;
 		low-max-current = <200>;
 		torch-max-current = <100>;
@@ -199,10 +204,6 @@
 		torch-mitigation-levels = <100 0>;
 		curve_mA_values = <0 100 200 400 550 700
 								850 1000 1200 1400 1600 1800 2000>;
-		/* Relative flux values are 16.16 fixed point.
-		   The table below in decimal form is:
-		   0, 0.0776, 0.1451, 0.2773, 0.3649, 0.4540,
-		   0.5359, 0.6121, 0.7069, 0.8003, 0.8764, 0.9382, 1.0 */
 		curve_rel_flux_values = <0 5085 9510 18173 23917 29755
 								35122 40113 46327 52448 57438 61487 65536>;
 		preflash-divisor = <10>;
@@ -354,9 +355,9 @@
 		qcom,i2c-freq-mode = <1>;
 		cam_vana-supply = <&pm8994_l29>;
 		qcom,cam-vreg-name = "cam_vana";
-		qcom,cam-vreg-min-voltage = <3200000>;
-		qcom,cam-vreg-max-voltage = <3200000>;
-		qcom,cam-vreg-op-mode = <3200000>;
+		qcom,cam-vreg-min-voltage = <3400000>;
+		qcom,cam-vreg-max-voltage = <3400000>;
+		qcom,cam-vreg-op-mode = <3400000>;
 		qcom,gpio-no-mux = <0>;
 		pinctrl-names = "cam_default", "cam_suspend";
 		pinctrl-0 = <&cam_sensor_mclk2_active &cam_sensor_front_active>;
@@ -409,9 +410,9 @@
 		qcom,mount-angle = <270>;
 		cam_vana-supply = <&pm8994_l29>;
 		qcom,cam-vreg-name = "cam_vana";
-		qcom,cam-vreg-min-voltage = <3200000>;
-		qcom,cam-vreg-max-voltage = <3200000>;
-		qcom,cam-vreg-op-mode = <3200000>;
+		qcom,cam-vreg-min-voltage = <3400000>;
+		qcom,cam-vreg-max-voltage = <3400000>;
+		qcom,cam-vreg-op-mode = <3400000>;
 		qcom,gpio-no-mux = <0>;
 		pinctrl-names = "cam_default", "cam_suspend";
 		pinctrl-0 = <&cam_sensor_mclk2_active &cam_sensor_front_active>;

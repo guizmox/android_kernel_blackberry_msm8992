@@ -88,27 +88,34 @@ static void bbry_flash_set_mitigation_level(struct bbry_flash_ctrl_t *fctrl,
 		cfg->torch_mitigation_level, fctrl->torch_mitigation.limit);
 }
 
-static void bbry_flash_apply_mitigation(struct bbry_flash_ctrl_t *fctrl)
+static void bbry_flash_apply_mitigation(struct bbry_flash_ctrl_t *fctrl,
+					struct msm_flash_cfg_data_t *cfg)
 {
 	int i;
-	struct msm_flash_cfg_data_t cfg;
+	struct msm_flash_cfg_data_t replay_cfg;
 
 	if ((fctrl->state == CFG_TORCH_ON) ||
 		(fctrl->state == CFG_FLASH_LOW) ||
 		(fctrl->state == CFG_FLASH_HIGH)) {
 
 		/* Re-create the previous request and apply it again */
-		cfg.cfg_type = fctrl->state;
+		replay_cfg.cfg_type = fctrl->state;
 		for (i = 0; i < fctrl->hw_data.flash_count; i++) {
 			if (fctrl->flash[i].type == INVALID_FLASH)
 				continue;
 
-			cfg.flash_current[i] =
+			replay_cfg.flash_current[i] =
 					fctrl->flash[i].state.requested_current;
-			cfg.flash_duration[i] =
+			replay_cfg.flash_duration[i] =
 					fctrl->flash[i].state.flash_duration;
 		}
-		bbry_flash_config(fctrl, &cfg);
+		bbry_flash_config(fctrl, &replay_cfg);
+
+		for (i = 0; i < fctrl->hw_data.flash_count; i++) {
+			cfg->flash_current[i] = replay_cfg.flash_current[i];
+			cfg->flash_duration[i] = replay_cfg.flash_duration[i];
+		}
+
 	}
 }
 
@@ -259,10 +266,10 @@ static uint32_t bbry_flash_interpolate_flux(struct bbry_flux_curve_t curve,
 	int lower_index = 0;
 	int upper_index = curve.num_points - 1;
 
-	if (current_mA <= curve.mA_values[0]) {
-		return curve.rel_flux_values[0];
-	} else if (current_mA >= curve.mA_values[upper_index]) {
+	if (current_mA >= curve.mA_values[upper_index]) {
 		return curve.rel_flux_values[upper_index];
+	} else if (current_mA <= curve.mA_values[0]) {
+		return curve.rel_flux_values[0];
 	} else {
 		int test_index;
 		uint32_t x_n;
@@ -273,11 +280,8 @@ static uint32_t bbry_flash_interpolate_flux(struct bbry_flux_curve_t curve,
 
 		/* binary search for the indexes above and below current_mA */
 		while ((upper_index - lower_index) > 1) {
-			test_index = (upper_index + lower_index) / 2;
-
-			/* avoid infinite loops due to integer division */
-			if (test_index == lower_index)
-				test_index++;
+			test_index = lower_index +
+					((upper_index - lower_index) / 2);
 
 			if (current_mA == curve.mA_values[test_index]) {
 				/* no interpolation needed, found a match */
@@ -371,7 +375,6 @@ static int32_t bbry_flash_pre_process_event(struct bbry_flash_ctrl_t *fctrl,
 		break;
 	case CFG_FLASH_MITIGATION_LEVELS:
 		bbry_flash_set_mitigation_level(fctrl, cfg);
-		bbry_flash_apply_mitigation(fctrl);
 		bbry_flash_calc_relative_flux(fctrl, cfg);
 		break;
 	case CFG_FLASH_HW_DATA:
@@ -379,6 +382,10 @@ static int32_t bbry_flash_pre_process_event(struct bbry_flash_ctrl_t *fctrl,
 		break;
 	case CFG_FLASH_STATE:
 		cfg->state = fctrl->state;
+		break;
+	case CFG_FLASH_KEEP_ALIVE:
+		fctrl->keep_alive = true;
+		pr_info("Keep alive\n");
 		break;
 	default:
 		break;
@@ -414,6 +421,10 @@ static int32_t bbry_flash_post_process_event(struct bbry_flash_ctrl_t *fctrl,
 		update_flash_state = 1;
 		bbry_flash_gpio_trigger_high(fctrl);
 		break;
+	case CFG_FLASH_MITIGATION_LEVELS:
+		update_flash_state = 0;
+		bbry_flash_apply_mitigation(fctrl, cfg);
+		break;
 	default:
 		update_flash_state = 0;
 		break;
@@ -426,6 +437,14 @@ static int32_t bbry_flash_post_process_event(struct bbry_flash_ctrl_t *fctrl,
 				continue;
 
 			fctrl->flash[i].state = cmds[i];
+		}
+	}
+
+	for (i = 0; i < MAX_LED_TRIGGERS; i++) {
+		if ((i >= fctrl->hw_data.flash_count) ||
+			(fctrl->flash[i].type == INVALID_FLASH)) {
+			cfg->flash_current[i] = 0;
+			cfg->flash_duration[i] = 0;
 		}
 	}
 	return 0;
@@ -446,7 +465,8 @@ static bool bbry_flash_is_cmd_allowed(struct bbry_flash_ctrl_t *fctrl,
 		if ((cfg->cfg_type != CFG_FLASH_INIT) &&
 			(cfg->cfg_type != CFG_FLASH_MITIGATION_LEVELS) &&
 			(cfg->cfg_type != CFG_FLASH_HW_DATA) &&
-			(cfg->cfg_type != CFG_FLASH_STATE)) {
+			(cfg->cfg_type != CFG_FLASH_STATE) &&
+			(cfg->cfg_type != CFG_FLASH_KEEP_ALIVE)) {
 			pr_err(
 				"cfg_type %d not allowed until flash has been initialized\n",
 				cfg->cfg_type);
@@ -534,6 +554,7 @@ static int32_t bbry_flash_config(struct bbry_flash_ctrl_t *fctrl, void *data)
 		case CFG_FLASH_MITIGATION_LEVELS:
 		case CFG_FLASH_HW_DATA:
 		case CFG_FLASH_STATE:
+		case CFG_FLASH_KEEP_ALIVE:
 			/* Nothing to be done by each flash subdriver */
 			rc = 0;
 			break;
@@ -612,16 +633,24 @@ static long bbry_flash_subdev_ioctl(struct v4l2_subdev *sd,
 
 static int bbry_flash_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
-	if (1 != v4l2_fh_is_singular(&fh->vfh)) {
-		pr_info("Subdev open rejected: only one client allowed\n");
-		return -EBUSY;
-	}
+	struct bbry_flash_ctrl_t *fctrl;
+
+	fctrl = v4l2_get_subdevdata(sd);
+	if (fctrl != NULL)
+		fctrl->keep_alive = false;
+
 	return 0;
 }
 
 static int bbry_flash_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
 	if (1 == v4l2_fh_is_singular(&fh->vfh)) {
+		struct bbry_flash_ctrl_t *fctrl;
+
+		fctrl = v4l2_get_subdevdata(sd);
+		if ((fctrl != NULL) && (fctrl->keep_alive))
+			return 0;
+
 		/* When the last client disconnects, shut down the hardware */
 		return bbry_flash_subdev_ioctl(sd, MSM_SD_SHUTDOWN, NULL);
 	}

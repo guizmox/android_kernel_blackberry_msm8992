@@ -1,0 +1,49 @@
+* Maxim MAX77387 Flash LED controller
+
+Required properties:
+- compatible : should be "maxim,max77387"
+- reg : I2C slave address of the device
+
+Optional subnodes:
+Each subnode represents either a flash or torch channel.
+
+Subnode properties:
+- flash-type       : must be "MAX77387"
+- max-current      : maximum current in mA
+- default-current  : default current in mA
+
+Example:
+
+    i2c@f9928000 {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        max77387@4a {
+            compatible = "maxim,max77387";
+            reg = <0x4a>;
+
+            flash0: flash@0 {
+                flash-type = "MAX77387";
+                max-current = <2000>;
+                default-current = <2000>;
+            };
+
+            torch0: torch@0 {
+                flash-type = "MAX77387";
+                max-current = <200>;
+                default-current = <200>;
+            };
+
+            flash1: flash@1 {
+                flash-type = "MAX77387";
+                max-current = <2000>;
+                default-current = <2000>;
+            };
+
+            torch1: torch@1 {
+                flash-type = "MAX77387";
+                max-current = <200>;
+                default-current = <200>;
+            };
+        };
+    };

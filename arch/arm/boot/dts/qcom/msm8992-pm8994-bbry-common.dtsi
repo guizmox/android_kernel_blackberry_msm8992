@@ -945,6 +945,8 @@
 		pinctrl-names = "mdss_default", "mdss_sleep";
 		pinctrl-0 = <&mdss_te_active>;
 		pinctrl-1 = <&mdss_te_suspend>;
+		qcom,mdss-dsi-bpp = <24>;
+		qcom,mdss-dsi-num-of-lanes = <4>;
 		vdd-supply = <&pm8994_l10>;
 		qcom,panel-supply-entries {
 			qcom,panel-supply-entry@0 {
@@ -1356,11 +1358,11 @@
 	qcom,init-voltage = <1000000>;
 };
 
-/* Camera 3.2v (PM8994_L29_2V8_FFC_ANA) */
+/* Camera 3.4v (PM8994_L29_2V8_FFC_ANA) */
 &pm8994_l29 {
-	regulator-min-microvolt = <3200000>;
-	regulator-max-microvolt = <3200000>;
-	qcom,init-voltage = <3200000>;
+	regulator-min-microvolt = <3400000>;
+	regulator-max-microvolt = <3400000>;
+	qcom,init-voltage = <3400000>;
 };
 
 /* Voltage ADC Channels */
@@ -1754,6 +1756,28 @@
 };
 
 &spmi_bus {
+	qcom,pmi8994@2 {
+		qcom,leds@a300 {
+			status = "disabled";
+			compatible = "qcom,leds-qpnp";
+			label = "mpp";
+			reg = <0xa300 0x100>;
+
+			qcom,led_mpp_4 {
+				status = "disabled";
+				label = "mpp";
+				linux,name = "led:mute";
+				qcom,default-state = "off";
+				linux,default-trigger = "none";
+				qcom,max-current = <5>;
+				qcom,id = <6>;
+				qcom,source-sel = <1>;
+				qcom,mode-ctrl = <0x61>;
+				qcom,mode = "manual";
+			};
+		};
+	};
+
 	qcom,pmi8994@3 {
 		pmi8994_pwm_1: pwm@b100 {
 			reg = <0xb100 0x100>,
@@ -1936,28 +1960,13 @@
 	msm_cpufreq: qcom,msm-cpufreq {
 		qcom,cpufreq-table-0 =
 			<  384000 >,
-			<  460800 >,
-			<  600000 >,
-			<  672000 >,
 			<  787200 >,
-			<  864000 >,
-			<  960000 >,
-			< 1248000 >,
 			< 1440000 >;
 
 		qcom,cpufreq-table-4 =
 			<  384000 >,
-			<  480000 >,
-			<  633600 >,
-			<  768000 >,
 			<  864000 >,
-			<  960000 >,
 			< 1248000 >,
-			< 1344000 >,
-			< 1440000 >,
-			< 1536000 >,
-			< 1632000 >,
-			< 1689600 >,
 			< 1824000 >;
 	};
 

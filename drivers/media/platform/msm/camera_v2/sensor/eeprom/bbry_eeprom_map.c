@@ -321,6 +321,11 @@ int bbry_read_eeprom_memory(struct msm_eeprom_ctrl_t *e_ctrl,
 		    memptr += emap[j].mem.valid_size;
 		}
 	}
+
+	pr_info("Dump OTP for eeprom: %s\n", e_ctrl->eboard_info->eeprom_name);
+	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_OFFSET,
+               16, 1, block->mapdata, block->num_data, false);
+
 	return rc;
 }
 

@@ -1686,6 +1686,8 @@ static int qpnp_flash_led_parse_common_dt(
 
 	led->pinctrl = devm_pinctrl_get(&led->spmi_dev->dev);
 	if (IS_ERR_OR_NULL(led->pinctrl)) {
+		dev_err(&led->spmi_dev->dev, "Requesting pinctrl for node: %s\n",
+		led->spmi_dev->dev.of_node->full_name);
 		dev_err(&led->spmi_dev->dev,
 					"Unable to quire pinctrl\n");
 		led->pinctrl = NULL;

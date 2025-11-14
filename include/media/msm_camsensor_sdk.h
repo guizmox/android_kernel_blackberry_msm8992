@@ -173,6 +173,7 @@ enum msm_flash_cfg_type_t {
 	CFG_FLASH_MITIGATION_LEVELS,
 	CFG_FLASH_HW_DATA,
 	CFG_FLASH_STATE,
+	CFG_FLASH_KEEP_ALIVE
 };
 
 struct msm_sensor_power_setting {

@@ -328,6 +328,49 @@ static ssize_t synaptics_rmi4_f01_buildid_show(struct device *dev,
 static ssize_t synaptics_rmi4_f01_flashprog_show(struct device *dev,
 		struct device_attribute *attr, char *buf);
 
+
+static ssize_t synaptics_rmi4_enable_device_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", rmi4_data->device_enabled ? 1 : 0);
+}
+
+static ssize_t synaptics_rmi4_enable_device_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
+	int enable;
+	int retval = 0;
+
+	if (sscanf(buf, "%d", &enable) != 1)
+		return -EINVAL;
+
+	if (enable == 0) {
+		dev_info(dev, "%s: disabling touch device\n", __func__);
+
+		synaptics_rmi4_irq_enable(rmi4_data, false, false);
+		synaptics_rmi4_sensor_sleep(rmi4_data);
+		rmi4_data->device_enabled = false;
+
+	} else if (enable == 1) {
+		dev_info(dev, "%s: enabling touch device\n", __func__);
+
+		if (rmi4_data->pwr_reg)
+			regulator_enable(rmi4_data->pwr_reg);
+		synaptics_rmi4_sensor_wake(rmi4_data);
+		retval = synaptics_rmi4_irq_enable(rmi4_data, true, false);
+		if (retval < 0)
+			dev_err(dev, "%s: Failed to enable irq (%d)\n", __func__, retval);
+		rmi4_data->device_enabled = true;
+
+	} else {
+		return -EINVAL;
+	}
+
+	return count;
+}
+
 #ifdef CONFIG_BBRY_DEBUG
 static ssize_t synaptics_rmi4_0dbutton_show(struct device *dev,
 		struct device_attribute *attr, char *buf);
@@ -828,6 +871,9 @@ static struct device_attribute attrs[] = {
 	__ATTR(turn_off, (S_IRUSR | S_IRGRP | S_IWUSR | S_IWGRP),
 			synaptics_rmi4_turn_off_show,
 			synaptics_rmi4_turn_off_store),
+	__ATTR(enable_device, 0664,
+			synaptics_rmi4_enable_device_show,
+			synaptics_rmi4_enable_device_store),
 #ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_DDT
 	__ATTR(mtouch_counter, (S_IRUSR | S_IRGRP | S_IWUSR | S_IWGRP),
 			synaptics_rmi4_mtouch_counter_show,
